@@ -1,0 +1,7 @@
+{
+  "dialect": "mssql",
+  "schema": "./src/db/schema.ts",
+  "dbCredentials": {
+    "connectionString": "sqlserver://DESKTOP-H7B9HA5:1433;database=basepfe;user=sa;password=maher;encrypt=true;trustServerCertificate=true"
+  }
+}
