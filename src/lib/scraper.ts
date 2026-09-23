@@ -11,6 +11,7 @@ export interface ScrapedOffer {
   sourceUrl: string;
   source: string;
   postedAt: string;
+  externalId?: string;
 }
 
 const HEADERS = {
@@ -67,41 +68,123 @@ export async function scrapeIndeed(query: string, location = "Europe"): Promise<
   return offers.slice(0, 10);
 }
 
-// ── LinkedIn (public job search) ───────────────────────────────────────────
-export async function scrapeLinkedIn(query: string, location = "Europe"): Promise<ScrapedOffer[]> {
-  const offers: ScrapedOffer[] = [];
-  const encodedQuery = encodeURIComponent(query);
-  const encodedLocation = encodeURIComponent(location);
-  const url = `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=${encodedQuery}&location=${encodedLocation}&f_TP=1,2&f_JT=I&start=0`;
+// ── LinkedIn (pages publiques "guest", SANS connexion ni cookies) ──────────
+// Volontairement sans login : se connecter par script à un vrai compte est ce
+// qui déclenche restrictions/bannissements. On s'arrête net au moindre signe de
+// blocage (429, 999, authwall, captcha) : aucun contournement.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const jitter = (min: number, max: number) => min + Math.random() * (max - min);
 
-  const html = await fetchPage(url);
-  if (!html) return offers;
+export class LinkedInBlockedError extends Error {}
 
-  const $ = cheerio.load(html);
-
-  $("li").each((_, el) => {
-    const title = $(el).find(".base-search-card__title").text().trim();
-    const company = $(el).find(".base-search-card__subtitle").text().trim();
-    const loc = $(el).find(".job-search-card__location").text().trim();
-    const link = $(el).find("a.base-card__full-link").attr("href") ?? "";
-    const timeAgo = $(el).find("time").text().trim();
-
-    if (title && company) {
-      offers.push({
-        title,
-        company,
-        location: loc,
-        country: detectCountry(loc),
-        description: `Offre ${title} chez ${company}`,
-        requirements: [],
-        sourceUrl: link,
-        source: "LinkedIn",
-        postedAt: timeAgo || new Date().toISOString().split("T")[0],
-      });
-    }
+async function linkedinGet(url: string): Promise<string> {
+  const res = await axios.get(url, {
+    headers: HEADERS,
+    timeout: 15000,
+    maxRedirects: 2,
+    validateStatus: () => true,
   });
+  const finalUrl: string = res.request?.res?.responseUrl ?? url;
+  if (
+    [401, 403, 429, 999].includes(res.status) ||
+    /authwall|\/login|checkpoint|captcha/i.test(finalUrl)
+  ) {
+    throw new LinkedInBlockedError(`Accès limité par LinkedIn (HTTP ${res.status})`);
+  }
+  if (res.status >= 400) return "";
+  return res.data as string;
+}
 
-  return offers.slice(0, 10);
+function cleanText(html: string): string {
+  const $ = cheerio.load(`<div id="r">${html}</div>`);
+  $("br").replaceWith("\n");
+  $("li").each((_, li) => { $(li).prepend("• ").append("\n"); });
+  $("p, div, ul").each((_, e) => { $(e).append("\n"); });
+  return $("#r").text().replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
+}
+
+export interface LinkedInOptions {
+  pages?: number;        // 1 page ≈ 10 offres (défaut 2)
+  withDetails?: boolean; // récupère la description complète (défaut true)
+  maxDetails?: number;   // plafond de fiches détaillées par requête (défaut 10)
+  onLog?: (msg: string) => void;
+}
+
+export async function scrapeLinkedIn(
+  query: string,
+  location = "France",
+  opts: LinkedInOptions = {}
+): Promise<ScrapedOffer[]> {
+  const { pages = 2, withDetails = true, maxDetails = 10, onLog } = opts;
+  const offers: ScrapedOffer[] = [];
+  const seen = new Set<string>();
+
+  try {
+    for (let page = 0; page < pages; page++) {
+      const url =
+        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search" +
+        `?keywords=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}` +
+        `&f_JT=I&f_TPR=r2592000&start=${page * 10}`;
+
+      const html = await linkedinGet(url);
+      if (!html) break;
+      const $ = cheerio.load(html);
+      const cards = $("li");
+      if (cards.length === 0) break;
+
+      cards.each((_, el) => {
+        const urn = $(el).find("[data-entity-urn]").attr("data-entity-urn") ?? "";
+        const jobId = urn.split(":").pop() ?? "";
+        const title = $(el).find(".base-search-card__title").text().trim();
+        const company = $(el).find(".base-search-card__subtitle").text().trim();
+        const loc = $(el).find(".job-search-card__location").text().trim();
+        const posted = $(el).find("time").attr("datetime") ?? "";
+        if (!jobId || !title || !company || seen.has(jobId)) return;
+        seen.add(jobId);
+        offers.push({
+          externalId: jobId,
+          title,
+          company,
+          location: loc,
+          country: detectCountry(loc || location),
+          description: "",
+          requirements: [],
+          sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}`,
+          source: "LinkedIn",
+          postedAt: posted || new Date().toISOString().split("T")[0],
+        });
+      });
+
+      await sleep(jitter(2500, 5000));
+    }
+
+    if (withDetails) {
+      for (const offer of offers.slice(0, maxDetails)) {
+        const html = await linkedinGet(
+          `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${offer.externalId}`
+        );
+        if (html) {
+          const $ = cheerio.load(html);
+          const desc = $(".show-more-less-html__markup").html() ?? "";
+          if (desc) offer.description = cleanText(desc);
+          const criteria = $(".description__job-criteria-text")
+            .map((_, e) => $(e).text().trim()).get();
+          offer.requirements = criteria.filter(Boolean);
+        }
+        await sleep(jitter(2500, 5000));
+      }
+    }
+  } catch (e) {
+    if (e instanceof LinkedInBlockedError) {
+      onLog?.(`⛔ ${e.message} — arrêt de la collecte LinkedIn (pas de contournement).`);
+    } else {
+      onLog?.(`⚠️ Erreur LinkedIn: ${String(e)}`);
+    }
+  }
+
+  // Offres sans description complète : on garde le titre comme contexte minimal
+  for (const o of offers) if (!o.description) o.description = `${o.title} — ${o.company}`;
+  return offers;
 }
 
 // ── Glassdoor ─────────────────────────────────────────────────────────────
@@ -172,49 +255,6 @@ export async function scrapeErasmusIntern(query: string): Promise<ScrapedOffer[]
   });
 
   return offers.slice(0, 8);
-}
-
-// ── Simulate fallback offers when scraping yields nothing ──────────────────
-export function generateSimulatedOffers(
-  queries: string[],
-  targetCountries: string[]
-): ScrapedOffer[] {
-  const companies = [
-    { name: "Airbus", location: "Toulouse, France", country: "France" },
-    { name: "Thales", location: "Paris, France", country: "France" },
-    { name: "SAP", location: "Berlin, Allemagne", country: "Allemagne" },
-    { name: "Siemens", location: "Munich, Allemagne", country: "Allemagne" },
-    { name: "Amadeus", location: "Madrid, Espagne", country: "Espagne" },
-    { name: "CERN", location: "Genève, Suisse", country: "Suisse" },
-    { name: "AB InBev", location: "Bruxelles, Belgique", country: "Belgique" },
-    { name: "Philips", location: "Amsterdam, Pays-Bas", country: "Pays-Bas" },
-    { name: "Nokia", location: "Helsinki, Finlande", country: "Finlande" },
-    { name: "Ericsson", location: "Stockholm, Suède", country: "Suède" },
-    { name: "Booking.com", location: "Amsterdam, Pays-Bas", country: "Pays-Bas" },
-    { name: "Criteo", location: "Paris, France", country: "France" },
-  ];
-
-  const filtered = targetCountries.length > 0
-    ? companies.filter((c) => targetCountries.some((tc) => c.country.toLowerCase().includes(tc.toLowerCase())))
-    : companies;
-
-  const pool = filtered.length > 0 ? filtered : companies;
-
-  return queries.slice(0, 3).flatMap((query, qi) =>
-    pool.slice(qi * 2, qi * 2 + 3).map((c) => ({
-      title: `PFE / Stage – ${query}`,
-      company: c.name,
-      location: c.location,
-      country: c.country,
-      description: `Nous recherchons un(e) étudiant(e) en fin d'études pour un PFE de 6 mois dans le domaine de ${query}. 
-Vous intégrerez une équipe dynamique et travaillerez sur des projets innovants dans un environnement international.
-Vous aurez l'opportunité de mettre en pratique vos connaissances et de contribuer à des projets concrets.`,
-      requirements: [query.split(" ")[0], "Bac+4/5", "Français ou Anglais"],
-      sourceUrl: `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(query)}`,
-      source: "LinkedIn (simulé)",
-      postedAt: new Date().toISOString().split("T")[0],
-    }))
-  ).slice(0, 12);
 }
 
 // ── Country detection ──────────────────────────────────────────────────────

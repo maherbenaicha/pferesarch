@@ -58,7 +58,7 @@ npx drizzle-kit push
 ```bash
 # ⚠️ Vous devrez adapter le code Drizzle pour SQL Server
 # (Drizzle supporte SQL Server en beta 1.0)
-DATABASE_URL=sqlserver://DESKTOP-H7B9HA5:1433;database=basepfe;user=sa;password=maher;encrypt=true;trustServerCertificate=true
+DATABASE_URL=sqlserver://VOTRE_SERVEUR:1433;database=basepfe;user=sa;password=VOTRE_MOT_DE_PASSE;encrypt=true;trustServerCertificate=true
 ```
 
 Voir `docs/SQLSERVER.md` pour la migration complète vers SQL Server.

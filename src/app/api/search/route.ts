@@ -7,7 +7,6 @@ import {
   scrapeLinkedIn,
   scrapeWelcomeToTheJungle,
   scrapeErasmusIntern,
-  generateSimulatedOffers,
   type ScrapedOffer,
 } from "@/lib/scraper";
 import type { SearchSession, SearchStatus } from "@/db/schema";
@@ -98,10 +97,15 @@ export async function POST() {
       // 4. Scraping
       const allScraped: ScrapedOffer[] = [];
 
-      await appendLog("🔍 Recherche sur LinkedIn...");
+      await appendLog("🔍 Recherche sur LinkedIn (pages publiques, sans connexion)...");
+      const countries = profileForAI.targetCountries.length
+        ? profileForAI.targetCountries
+        : ["France"];
       for (const q of queries.slice(0, 3)) {
-        const res = await scrapeLinkedIn(q, profileForAI.targetCountries.join(" OR ") || "Europe");
-        allScraped.push(...res);
+        for (const country of countries.slice(0, 4)) {
+          const res = await scrapeLinkedIn(q, country, { pages: 1, maxDetails: 6, onLog: appendLog });
+          allScraped.push(...res);
+        }
       }
       await appendLog(`  → ${allScraped.length} offres sur LinkedIn`);
 
@@ -124,17 +128,10 @@ export async function POST() {
         allScraped.push(...res);
       }
 
-      // Fallback si trop peu d'offres
-      if (allScraped.length < 5) {
-        await appendLog("💡 Complément avec des offres représentatives...");
-        const simulated = generateSimulatedOffers(queries, profileForAI.targetCountries);
-        allScraped.push(...simulated);
-      }
-
       // Dédupliquer
       const seen = new Set<string>();
       const unique = allScraped.filter((o) => {
-        const key = `${o.title}|${o.company}`;
+        const key = o.sourceUrl || `${o.title}|${o.company}`;
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -155,26 +152,25 @@ export async function POST() {
         try {
           await appendLog(`🤖 Analyse: ${scraped.title} @ ${scraped.company}...`);
 
-          let analysis = {
-            matchScore: Math.floor(Math.random() * 40) + 45,
-            matchReason: `Le profil correspond aux exigences du poste de ${scraped.title}.`,
-            strengths: profileForAI.skills.slice(0, 3),
-            gaps: [] as string[],
-            adaptedCv: profileForAI.cvContent,
-            coverLetter: `Madame, Monsieur,\n\nJe me permets de vous adresser ma candidature pour le poste de ${scraped.title} au sein de ${scraped.company}...\n\nCordialement,\n${profileForAI.fullName}`,
-            linkedinMessage: `Bonjour, je suis intéressé(e) par votre offre de PFE "${scraped.title}". Mon profil en ${fieldOfStudy} correspond bien à vos besoins.`,
-            tags: profileForAI.skills.slice(0, 3),
-          };
+          // Déjà en base ? on ne ré-analyse pas.
+          const dup = await pool
+            .request()
+            .input("url", sql.NVarChar(1000), scraped.sourceUrl ?? "")
+            .query("SELECT TOP 1 id FROM offers WHERE source_url = @url");
+          if (dup.recordset.length > 0) continue;
 
-          if (process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY) {
-            analysis = await analyzeOffer(profileForAI, {
-              title: scraped.title,
-              company: scraped.company,
-              location: scraped.location,
-              description: scraped.description,
-              requirements: scraped.requirements as string[] ?? [],
-            });
+          if (!(process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY)) {
+            await appendLog("  ⚠️ Pas de clé IA : offre ignorée (aucun score inventé).");
+            continue;
           }
+
+          const analysis = await analyzeOffer(profileForAI, {
+            title: scraped.title,
+            company: scraped.company,
+            location: scraped.location,
+            description: scraped.description,
+            requirements: (scraped.requirements as string[]) ?? [],
+          });
 
           if (analysis.matchScore >= minScore) {
             await pool

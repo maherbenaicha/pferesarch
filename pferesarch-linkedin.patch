@@ -1,0 +1,351 @@
+diff --git a/README.md b/README.md
+index 8f010d0..9781b8a 100644
+--- a/README.md
++++ b/README.md
+@@ -58,7 +58,7 @@ npx drizzle-kit push
+ ```bash
+ # ⚠️ Vous devrez adapter le code Drizzle pour SQL Server
+ # (Drizzle supporte SQL Server en beta 1.0)
+-DATABASE_URL=sqlserver://DESKTOP-H7B9HA5:1433;database=basepfe;user=sa;password=maher;encrypt=true;trustServerCertificate=true
++DATABASE_URL=sqlserver://VOTRE_SERVEUR:1433;database=basepfe;user=sa;password=VOTRE_MOT_DE_PASSE;encrypt=true;trustServerCertificate=true
+ ```
+ 
+ Voir `docs/SQLSERVER.md` pour la migration complète vers SQL Server.
+diff --git a/docs/SQLSERVER.md b/docs/SQLSERVER.md
+index 7839ba3..3f7da26 100644
+--- a/docs/SQLSERVER.md
++++ b/docs/SQLSERVER.md
+@@ -44,10 +44,10 @@ import { drizzle } from "drizzle-orm/node-mssql";
+ import sql from "mssql";
+ 
+ const config = {
+-  server: "DESKTOP-H7B9HA5",
++  server: "VOTRE_SERVEUR",
+   database: "basepfe",
+   user: "sa",
+-  password: "maher",
++  password: process.env.DB_PASSWORD,
+   options: {
+     encrypt: true,
+     trustServerCertificate: true,
+diff --git a/drizzle.config.json b/drizzle.config.json
+index 9d07712..e464cfd 100644
+--- a/drizzle.config.json
++++ b/drizzle.config.json
+@@ -2,6 +2,6 @@
+   "dialect": "mssql",
+   "schema": "./src/db/schema.ts",
+   "dbCredentials": {
+-    "connectionString": "sqlserver://DESKTOP-H7B9HA5:1433;database=basepfe;user=sa;password=maher;encrypt=true;trustServerCertificate=true"
++    "connectionString": "sqlserver://VOTRE_SERVEUR:1433;database=basepfe;user=sa;password=VOTRE_MOT_DE_PASSE;encrypt=true;trustServerCertificate=true"
+   }
+ }
+diff --git a/src/app/api/search/route.ts b/src/app/api/search/route.ts
+index f3cddc3..fd7da1d 100644
+--- a/src/app/api/search/route.ts
++++ b/src/app/api/search/route.ts
+@@ -7,7 +7,6 @@ import {
+   scrapeLinkedIn,
+   scrapeWelcomeToTheJungle,
+   scrapeErasmusIntern,
+-  generateSimulatedOffers,
+   type ScrapedOffer,
+ } from "@/lib/scraper";
+ import type { SearchSession, SearchStatus } from "@/db/schema";
+@@ -98,10 +97,15 @@ export async function POST() {
+       // 4. Scraping
+       const allScraped: ScrapedOffer[] = [];
+ 
+-      await appendLog("🔍 Recherche sur LinkedIn...");
++      await appendLog("🔍 Recherche sur LinkedIn (pages publiques, sans connexion)...");
++      const countries = profileForAI.targetCountries.length
++        ? profileForAI.targetCountries
++        : ["France"];
+       for (const q of queries.slice(0, 3)) {
+-        const res = await scrapeLinkedIn(q, profileForAI.targetCountries.join(" OR ") || "Europe");
+-        allScraped.push(...res);
++        for (const country of countries.slice(0, 4)) {
++          const res = await scrapeLinkedIn(q, country, { pages: 1, maxDetails: 6, onLog: appendLog });
++          allScraped.push(...res);
++        }
+       }
+       await appendLog(`  → ${allScraped.length} offres sur LinkedIn`);
+ 
+@@ -124,17 +128,10 @@ export async function POST() {
+         allScraped.push(...res);
+       }
+ 
+-      // Fallback si trop peu d'offres
+-      if (allScraped.length < 5) {
+-        await appendLog("💡 Complément avec des offres représentatives...");
+-        const simulated = generateSimulatedOffers(queries, profileForAI.targetCountries);
+-        allScraped.push(...simulated);
+-      }
+-
+       // Dédupliquer
+       const seen = new Set<string>();
+       const unique = allScraped.filter((o) => {
+-        const key = `${o.title}|${o.company}`;
++        const key = o.sourceUrl || `${o.title}|${o.company}`;
+         if (seen.has(key)) return false;
+         seen.add(key);
+         return true;
+@@ -155,27 +152,26 @@ export async function POST() {
+         try {
+           await appendLog(`🤖 Analyse: ${scraped.title} @ ${scraped.company}...`);
+ 
+-          let analysis = {
+-            matchScore: Math.floor(Math.random() * 40) + 45,
+-            matchReason: `Le profil correspond aux exigences du poste de ${scraped.title}.`,
+-            strengths: profileForAI.skills.slice(0, 3),
+-            gaps: [] as string[],
+-            adaptedCv: profileForAI.cvContent,
+-            coverLetter: `Madame, Monsieur,\n\nJe me permets de vous adresser ma candidature pour le poste de ${scraped.title} au sein de ${scraped.company}...\n\nCordialement,\n${profileForAI.fullName}`,
+-            linkedinMessage: `Bonjour, je suis intéressé(e) par votre offre de PFE "${scraped.title}". Mon profil en ${fieldOfStudy} correspond bien à vos besoins.`,
+-            tags: profileForAI.skills.slice(0, 3),
+-          };
++          // Déjà en base ? on ne ré-analyse pas.
++          const dup = await pool
++            .request()
++            .input("url", sql.NVarChar(1000), scraped.sourceUrl ?? "")
++            .query("SELECT TOP 1 id FROM offers WHERE source_url = @url");
++          if (dup.recordset.length > 0) continue;
+ 
+-          if (process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY) {
+-            analysis = await analyzeOffer(profileForAI, {
+-              title: scraped.title,
+-              company: scraped.company,
+-              location: scraped.location,
+-              description: scraped.description,
+-              requirements: scraped.requirements as string[] ?? [],
+-            });
++          if (!(process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY)) {
++            await appendLog("  ⚠️ Pas de clé IA : offre ignorée (aucun score inventé).");
++            continue;
+           }
+ 
++          const analysis = await analyzeOffer(profileForAI, {
++            title: scraped.title,
++            company: scraped.company,
++            location: scraped.location,
++            description: scraped.description,
++            requirements: (scraped.requirements as string[]) ?? [],
++          });
++
+           if (analysis.matchScore >= minScore) {
+             await pool
+               .request()
+diff --git a/src/lib/scraper.ts b/src/lib/scraper.ts
+index eff3bc5..dbca4b4 100644
+--- a/src/lib/scraper.ts
++++ b/src/lib/scraper.ts
+@@ -11,6 +11,7 @@ export interface ScrapedOffer {
+   sourceUrl: string;
+   source: string;
+   postedAt: string;
++  externalId?: string;
+ }
+ 
+ const HEADERS = {
+@@ -67,41 +68,123 @@ export async function scrapeIndeed(query: string, location = "Europe"): Promise<
+   return offers.slice(0, 10);
+ }
+ 
+-// ── LinkedIn (public job search) ───────────────────────────────────────────
+-export async function scrapeLinkedIn(query: string, location = "Europe"): Promise<ScrapedOffer[]> {
+-  const offers: ScrapedOffer[] = [];
+-  const encodedQuery = encodeURIComponent(query);
+-  const encodedLocation = encodeURIComponent(location);
+-  const url = `https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=${encodedQuery}&location=${encodedLocation}&f_TP=1,2&f_JT=I&start=0`;
++// ── LinkedIn (pages publiques "guest", SANS connexion ni cookies) ──────────
++// Volontairement sans login : se connecter par script à un vrai compte est ce
++// qui déclenche restrictions/bannissements. On s'arrête net au moindre signe de
++// blocage (429, 999, authwall, captcha) : aucun contournement.
++const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
++const jitter = (min: number, max: number) => min + Math.random() * (max - min);
++
++export class LinkedInBlockedError extends Error {}
++
++async function linkedinGet(url: string): Promise<string> {
++  const res = await axios.get(url, {
++    headers: HEADERS,
++    timeout: 15000,
++    maxRedirects: 2,
++    validateStatus: () => true,
++  });
++  const finalUrl: string = res.request?.res?.responseUrl ?? url;
++  if (
++    [401, 403, 429, 999].includes(res.status) ||
++    /authwall|\/login|checkpoint|captcha/i.test(finalUrl)
++  ) {
++    throw new LinkedInBlockedError(`Accès limité par LinkedIn (HTTP ${res.status})`);
++  }
++  if (res.status >= 400) return "";
++  return res.data as string;
++}
+ 
+-  const html = await fetchPage(url);
+-  if (!html) return offers;
++function cleanText(html: string): string {
++  const $ = cheerio.load(`<div id="r">${html}</div>`);
++  $("br").replaceWith("\n");
++  $("li").each((_, li) => { $(li).prepend("• ").append("\n"); });
++  $("p, div, ul").each((_, e) => { $(e).append("\n"); });
++  return $("#r").text().replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
++}
+ 
+-  const $ = cheerio.load(html);
++export interface LinkedInOptions {
++  pages?: number;        // 1 page ≈ 10 offres (défaut 2)
++  withDetails?: boolean; // récupère la description complète (défaut true)
++  maxDetails?: number;   // plafond de fiches détaillées par requête (défaut 10)
++  onLog?: (msg: string) => void;
++}
+ 
+-  $("li").each((_, el) => {
+-    const title = $(el).find(".base-search-card__title").text().trim();
+-    const company = $(el).find(".base-search-card__subtitle").text().trim();
+-    const loc = $(el).find(".job-search-card__location").text().trim();
+-    const link = $(el).find("a.base-card__full-link").attr("href") ?? "";
+-    const timeAgo = $(el).find("time").text().trim();
++export async function scrapeLinkedIn(
++  query: string,
++  location = "France",
++  opts: LinkedInOptions = {}
++): Promise<ScrapedOffer[]> {
++  const { pages = 2, withDetails = true, maxDetails = 10, onLog } = opts;
++  const offers: ScrapedOffer[] = [];
++  const seen = new Set<string>();
+ 
+-    if (title && company) {
+-      offers.push({
+-        title,
+-        company,
+-        location: loc,
+-        country: detectCountry(loc),
+-        description: `Offre ${title} chez ${company}`,
+-        requirements: [],
+-        sourceUrl: link,
+-        source: "LinkedIn",
+-        postedAt: timeAgo || new Date().toISOString().split("T")[0],
++  try {
++    for (let page = 0; page < pages; page++) {
++      const url =
++        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search" +
++        `?keywords=${encodeURIComponent(query)}&location=${encodeURIComponent(location)}` +
++        `&f_JT=I&f_TPR=r2592000&start=${page * 10}`;
++
++      const html = await linkedinGet(url);
++      if (!html) break;
++      const $ = cheerio.load(html);
++      const cards = $("li");
++      if (cards.length === 0) break;
++
++      cards.each((_, el) => {
++        const urn = $(el).find("[data-entity-urn]").attr("data-entity-urn") ?? "";
++        const jobId = urn.split(":").pop() ?? "";
++        const title = $(el).find(".base-search-card__title").text().trim();
++        const company = $(el).find(".base-search-card__subtitle").text().trim();
++        const loc = $(el).find(".job-search-card__location").text().trim();
++        const posted = $(el).find("time").attr("datetime") ?? "";
++        if (!jobId || !title || !company || seen.has(jobId)) return;
++        seen.add(jobId);
++        offers.push({
++          externalId: jobId,
++          title,
++          company,
++          location: loc,
++          country: detectCountry(loc || location),
++          description: "",
++          requirements: [],
++          sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}`,
++          source: "LinkedIn",
++          postedAt: posted || new Date().toISOString().split("T")[0],
++        });
+       });
++
++      await sleep(jitter(2500, 5000));
+     }
+-  });
+ 
+-  return offers.slice(0, 10);
++    if (withDetails) {
++      for (const offer of offers.slice(0, maxDetails)) {
++        const html = await linkedinGet(
++          `https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/${offer.externalId}`
++        );
++        if (html) {
++          const $ = cheerio.load(html);
++          const desc = $(".show-more-less-html__markup").html() ?? "";
++          if (desc) offer.description = cleanText(desc);
++          const criteria = $(".description__job-criteria-text")
++            .map((_, e) => $(e).text().trim()).get();
++          offer.requirements = criteria.filter(Boolean);
++        }
++        await sleep(jitter(2500, 5000));
++      }
++    }
++  } catch (e) {
++    if (e instanceof LinkedInBlockedError) {
++      onLog?.(`⛔ ${e.message} — arrêt de la collecte LinkedIn (pas de contournement).`);
++    } else {
++      onLog?.(`⚠️ Erreur LinkedIn: ${String(e)}`);
++    }
++  }
++
++  // Offres sans description complète : on garde le titre comme contexte minimal
++  for (const o of offers) if (!o.description) o.description = `${o.title} — ${o.company}`;
++  return offers;
+ }
+ 
+ // ── Glassdoor ─────────────────────────────────────────────────────────────
+@@ -174,49 +257,6 @@ export async function scrapeErasmusIntern(query: string): Promise<ScrapedOffer[]
+   return offers.slice(0, 8);
+ }
+ 
+-// ── Simulate fallback offers when scraping yields nothing ──────────────────
+-export function generateSimulatedOffers(
+-  queries: string[],
+-  targetCountries: string[]
+-): ScrapedOffer[] {
+-  const companies = [
+-    { name: "Airbus", location: "Toulouse, France", country: "France" },
+-    { name: "Thales", location: "Paris, France", country: "France" },
+-    { name: "SAP", location: "Berlin, Allemagne", country: "Allemagne" },
+-    { name: "Siemens", location: "Munich, Allemagne", country: "Allemagne" },
+-    { name: "Amadeus", location: "Madrid, Espagne", country: "Espagne" },
+-    { name: "CERN", location: "Genève, Suisse", country: "Suisse" },
+-    { name: "AB InBev", location: "Bruxelles, Belgique", country: "Belgique" },
+-    { name: "Philips", location: "Amsterdam, Pays-Bas", country: "Pays-Bas" },
+-    { name: "Nokia", location: "Helsinki, Finlande", country: "Finlande" },
+-    { name: "Ericsson", location: "Stockholm, Suède", country: "Suède" },
+-    { name: "Booking.com", location: "Amsterdam, Pays-Bas", country: "Pays-Bas" },
+-    { name: "Criteo", location: "Paris, France", country: "France" },
+-  ];
+-
+-  const filtered = targetCountries.length > 0
+-    ? companies.filter((c) => targetCountries.some((tc) => c.country.toLowerCase().includes(tc.toLowerCase())))
+-    : companies;
+-
+-  const pool = filtered.length > 0 ? filtered : companies;
+-
+-  return queries.slice(0, 3).flatMap((query, qi) =>
+-    pool.slice(qi * 2, qi * 2 + 3).map((c) => ({
+-      title: `PFE / Stage – ${query}`,
+-      company: c.name,
+-      location: c.location,
+-      country: c.country,
+-      description: `Nous recherchons un(e) étudiant(e) en fin d'études pour un PFE de 6 mois dans le domaine de ${query}. 
+-Vous intégrerez une équipe dynamique et travaillerez sur des projets innovants dans un environnement international.
+-Vous aurez l'opportunité de mettre en pratique vos connaissances et de contribuer à des projets concrets.`,
+-      requirements: [query.split(" ")[0], "Bac+4/5", "Français ou Anglais"],
+-      sourceUrl: `https://www.linkedin.com/jobs/search/?keywords=${encodeURIComponent(query)}`,
+-      source: "LinkedIn (simulé)",
+-      postedAt: new Date().toISOString().split("T")[0],
+-    }))
+-  ).slice(0, 12);
+-}
+-
+ // ── Country detection ──────────────────────────────────────────────────────
+ function detectCountry(location: string): string {
+   const loc = location.toLowerCase();

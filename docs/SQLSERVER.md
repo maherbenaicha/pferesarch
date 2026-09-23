@@ -44,10 +44,10 @@ import { drizzle } from "drizzle-orm/node-mssql";
 import sql from "mssql";
 
 const config = {
-  server: "DESKTOP-H7B9HA5",
+  server: "VOTRE_SERVEUR",
   database: "basepfe",
   user: "sa",
-  password: "maher",
+  password: process.env.DB_PASSWORD,
   options: {
     encrypt: true,
     trustServerCertificate: true,

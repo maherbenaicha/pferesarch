@@ -2,6 +2,6 @@
   "dialect": "mssql",
   "schema": "./src/db/schema.ts",
   "dbCredentials": {
-    "connectionString": "sqlserver://DESKTOP-H7B9HA5:1433;database=basepfe;user=sa;password=maher;encrypt=true;trustServerCertificate=true"
+    "connectionString": "sqlserver://VOTRE_SERVEUR:1433;database=basepfe;user=sa;password=VOTRE_MOT_DE_PASSE;encrypt=true;trustServerCertificate=true"
   }
 }
