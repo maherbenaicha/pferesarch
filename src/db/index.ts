@@ -46,13 +46,18 @@ if (process.env.NODE_ENV !== "production") {
   globalForDb.__mssqlPool = pool;
 }
 
-// Assure que le pool est connecté
-let poolConnected = false;
+// Assure que le pool est connecté (sûr avec le rechargement à chaud de Next.js :
+// on se base sur l'état réel du pool, pas sur une variable de module).
+let connectPromise: Promise<sql.ConnectionPool> | null = null;
 export async function getPool(): Promise<sql.ConnectionPool> {
-  if (!poolConnected) {
-    await pool.connect();
-    poolConnected = true;
+  if (pool.connected) return pool;
+  if (!connectPromise) {
+    connectPromise = pool.connect().catch((e) => {
+      connectPromise = null; // permet de réessayer à la requête suivante
+      throw e;
+    });
   }
+  await connectPromise;
   return pool;
 }
 

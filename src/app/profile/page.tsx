@@ -92,12 +92,14 @@ export default function ProfilePage() {
   const [profile, setProfile] = useState<Profile>(DEFAULT_PROFILE);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetch("/api/profile")
       .then((r) => r.json())
-      .then((data: Profile) => {
+      .then((data: Profile & { error?: string }) => {
+        if (data.error) { setSaveError(`Chargement impossible : ${data.error}`); return; }
         setProfile({
           ...DEFAULT_PROFILE,
           ...data,
@@ -127,10 +129,19 @@ export default function ProfilePage() {
 
   const save = async () => {
     setSaving(true);
+    setSaveError("");
     try {
-      await fetch("/api/profile", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(profile) });
+      const res = await fetch("/api/profile", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(profile),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `Erreur ${res.status}`);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
       setSaving(false);
     }
@@ -154,6 +165,7 @@ export default function ProfilePage() {
               Mon Profil
             </h1>
             <p className="text-slate-500 text-sm mt-1">Ces informations permettent à l&apos;IA de personnaliser la recherche</p>
+            {saveError && <p className="text-red-600 text-sm mt-1">❌ Non sauvegardé : {saveError}</p>}
           </div>
           <button
             onClick={save}
